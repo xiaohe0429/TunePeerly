@@ -106,14 +106,55 @@ function TimedAlert({ id, text, onClose }: { id: number; text: string; onClose: 
   );
 }
 
+// Dialogs are stacked in mount order; only the last one reacts to Tab and Escape.
+const DIALOG_STACK: symbol[] = [];
+const FOCUSABLE = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
+
 export function Modal({ children, onClose, label }: { children: ReactNode; onClose: () => void; label: string }) {
   const box = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     const first = box.current?.querySelector<HTMLElement>("input, textarea, button.primary, button");
     first?.focus();
     if (first instanceof HTMLInputElement) first.select();
     return () => previous?.focus?.();
+  }, []);
+  // Listening on the document instead of the box keeps both keys working once focus has left the
+  // dialog, and lets the topmost dialog win when several are open.
+  useEffect(() => {
+    const token = Symbol("dialog");
+    DIALOG_STACK.push(token);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (DIALOG_STACK[DIALOG_STACK.length - 1] !== token) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        close.current();
+        return;
+      }
+      if (event.key !== "Tab" || !box.current) return;
+      const items = Array.from(box.current.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((item) => item.getClientRects().length > 0);
+      if (items.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      const inside = !!active && box.current.contains(active);
+      if (!inside || (event.shiftKey && active === first) || (!event.shiftKey && active === last)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      const at = DIALOG_STACK.lastIndexOf(token);
+      if (at >= 0) DIALOG_STACK.splice(at, 1);
+    };
   }, []);
   return (
     <div
@@ -122,19 +163,7 @@ export function Modal({ children, onClose, label }: { children: ReactNode; onClo
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div
-        ref={box}
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={label}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.stopPropagation();
-            onClose();
-          }
-        }}
-      >
+      <div ref={box} className="modal" role="dialog" aria-modal="true" aria-label={label}>
         {children}
       </div>
     </div>
