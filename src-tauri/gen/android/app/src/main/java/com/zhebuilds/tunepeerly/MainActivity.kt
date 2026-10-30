@@ -76,7 +76,10 @@ class MainActivity : TauriActivity() {
     if (requestCode != REQUEST_FOLDER) return
     val tree = data?.data
     if (resultCode != Activity.RESULT_OK || tree == null) return
-    val root = File(filesDir, "music")
+    // The Rust scan looks in `app.path().data_dir()/music`, and on Android Tauri resolves
+    // `data_dir` through `Context.getDataDir()` (the app data root). `filesDir` is that
+    // root plus `files`, so copying next to it would import nothing.
+    val root = File(applicationContext.dataDir, "music")
     Thread {
       val copied = try {
         copyTree(tree, root)

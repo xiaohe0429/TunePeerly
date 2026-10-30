@@ -659,6 +659,7 @@ pub fn run() {
             app.manage(AppState { db, net, material });
             desktop::install(app.handle());
             desktop::sync_mini(app.handle(), on_minimize, in_tray);
+            #[cfg(target_os = "android")]
             import_mobile_music(app.handle());
             Ok(())
         })
@@ -720,11 +721,14 @@ fn cache_root(app: &AppHandle) -> std::path::PathBuf {
 }
 
 /// Where the Android folder picker copies the songs the user chose (private app storage).
+/// `MainActivity.onActivityResult` writes to the same folder, so both sides must agree on it.
+#[cfg(target_os = "android")]
 fn mobile_music_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().data_dir().ok().map(|dir| dir.join("music"))
 }
 
 /// Android has no file dialog that hands out real paths: the picker copies files in, then we scan.
+#[cfg(target_os = "android")]
 fn import_mobile_music(app: &AppHandle) {
     let Some(dir) = mobile_music_dir(app) else { return };
     if !dir.is_dir() {
