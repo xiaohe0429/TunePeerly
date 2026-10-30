@@ -108,6 +108,10 @@ impl Db {
              DROP TABLE IF EXISTS feature_revisions;
              DELETE FROM device_settings WHERE key IN ('historySyncMode', 'syncEnabled', 'audioShare', 'positionSync');",
         )?;
+        // Secondary indexes for the lookups done while playing, scanning and pruning. They are
+        // created after the columns above, so an upgrade cannot fail on a column that is missing
+        // from an older database yet.
+        self.conn.execute_batch(INDEXES)?;
         Ok(())
     }
 
@@ -1646,6 +1650,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS library_fts USING fts5(
     lyrics,
     folder
 );
+"#;
+
+// Every lookup below used to be a full table scan. Keep them in one batch so a fresh install and an
+// upgraded one reach the same shape, and so there is a single place to see what is indexed.
+//
+// `play_history(played_at)` is deliberately absent: it only serves the retention delete, and there
+// it made the trimming slower (the sub-query got faster, but the extra bloom filter over the id
+// list cost more than the old sort on a 60k-row history).
+const INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_local_files_content ON local_files(content_id);
+CREATE INDEX IF NOT EXISTS idx_holdings_content ON holdings(content_id);
+CREATE INDEX IF NOT EXISTS idx_play_history_content ON play_history(content_id);
+CREATE INDEX IF NOT EXISTS idx_play_history_local_file ON play_history(local_file_id);
+CREATE INDEX IF NOT EXISTS idx_playback_notes_content ON playback_notes(content_id);
+CREATE INDEX IF NOT EXISTS idx_playback_notes_attempt ON playback_notes(attempt_id);
 "#;
 
 pub fn merge_history_into_db(db: &Db, remote: Vec<HistoryEntry>) -> AppResult<Vec<HistoryEntry>> {
