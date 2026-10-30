@@ -1,5 +1,5 @@
 // Original work © 2026 zhebuilds. AGPLv3 plus ADDITIONAL_TERMS.md.
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type DesktopTrack } from "../api";
 import { coverSrc } from "./Cover";
@@ -23,6 +23,13 @@ function useDragOrClick(onClick: () => void) {
       const origin = start.current;
       start.current = null;
       if (origin && !origin.moved) onClick();
+    },
+    // The cover and the title are the only way back to the main window, so they must work from the
+    // keyboard too. Space would otherwise scroll the (tiny) window instead of restoring it.
+    onKeyDown: (event: ReactKeyboardEvent) => {
+      if (event.key !== "Enter" && event.key !== " " && event.code !== "Space") return;
+      event.preventDefault();
+      onClick();
     },
   };
 }
