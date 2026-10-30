@@ -72,13 +72,15 @@ class MainActivity : TauriActivity() {
   }
 
   private val picker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
-    if (tree != null) startImport(tree)
+    if (tree != null) startImport(tree) else cancelImport()
   }
 
   private fun startImport(tree: Uri) {
-    val music = File(filesDir, "music")
+    val music = musicDir()
     val marker = File(music, MARKER)
+    val partial = File(music, "$MARKER.part")
     marker.delete()
+    partial.delete()
     importer.execute {
       val copied = try {
         copyTree(tree, music)
@@ -94,11 +96,39 @@ class MainActivity : TauriActivity() {
         }
       }
       // Rust waits for this file: it means the folder is complete and safe to scan.
-      try {
-        marker.writeText(copied.toString())
-      } catch (err: Exception) {
-        Log.w(TAG, "could not write the import marker: ${err.message}")
-      }
+      writeMarker(marker, partial, copied)
+    }
+  }
+
+  /**
+   * Rust waits up to ten minutes for the marker, so a cancelled picker has to answer right away;
+   * otherwise the user gets no feedback until that timeout runs out.
+   */
+  private fun cancelImport() {
+    val music = musicDir()
+    music.mkdirs()
+    writeMarker(File(music, MARKER), File(music, "$MARKER.part"), IMPORT_CANCELLED)
+  }
+
+  /**
+   * Tauri's `data_dir()` resolves to [`Context.getDataDir()`], while [`filesDir`] adds one more
+   * `/files` level, so both sides have to agree on one of them: Rust scans `data_dir()/music`.
+   */
+  private fun musicDir(): File = File(applicationContext.dataDir, "music")
+
+  /**
+   * Written under a temporary name and renamed into place, so Rust never reads a half-written
+   * number; a negative value says that there is nothing to scan and why.
+   */
+  private fun writeMarker(marker: File, partial: File, value: Int) {
+    try {
+      partial.parentFile?.mkdirs()
+      partial.writeText(value.toString())
+      if (partial.renameTo(marker)) return
+      partial.delete()
+      marker.writeText(value.toString())
+    } catch (err: Exception) {
+      Log.w(TAG, "could not write the import marker: ${err.message}")
     }
   }
 
@@ -109,14 +139,16 @@ class MainActivity : TauriActivity() {
   private fun copyTree(tree: Uri, root: File): Int {
     val resolver = contentResolver
     var copied = 0
-    val pending = ArrayDeque<Pair<Uri, File>>()
-    pending.addLast(tree to root)
+    val rootId = DocumentsContract.getTreeDocumentId(tree)
+    val visited = mutableSetOf(rootId)
+    val pending = ArrayDeque<Pair<String, File>>()
+    pending.addLast(rootId to root)
     while (pending.isNotEmpty()) {
-      val (dirUri, dirFile) = pending.removeLast()
-      val children = DocumentsContract.buildChildDocumentsUriUsingTree(
-        dirUri,
-        DocumentsContract.getTreeDocumentId(dirUri),
-      )
+      val (dirId, dirFile) = pending.removeLast()
+      // Children must be listed with the id of *this* directory. The tree document id always
+      // points at the picked root, so using it here would walk the root over and over again
+      // instead of descending into subfolders.
+      val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, dirId)
       resolver.query(
         children,
         arrayOf(
@@ -134,9 +166,11 @@ class MainActivity : TauriActivity() {
           val name = safeName(cursor.getString(1) ?: continue)
           val mime = cursor.getString(2)
           val size = if (cursor.isNull(3)) -1L else cursor.getLong(3)
-          val childUri = DocumentsContract.buildDocumentUriUsingTree(dirUri, id)
+          val childUri = DocumentsContract.buildDocumentUriUsingTree(tree, id)
           if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-            pending.addLast(childUri to File(dirFile, name))
+            // A provider that reports a folder as its own child would otherwise copy until the
+            // device runs out of space.
+            if (visited.add(id)) pending.addLast(id to File(dirFile, name))
             continue
           }
           if (!isAudio(name)) continue
@@ -171,6 +205,8 @@ class MainActivity : TauriActivity() {
   private companion object {
     const val TAG = "TunePeerly"
     const val MARKER = ".import-done"
+    /** Marker value meaning that the user closed the picker without choosing a folder. */
+    const val IMPORT_CANCELLED = -2
     val AUDIO_EXTENSIONS = setOf(
       "mp3", "flac", "m4a", "m4b", "aac", "ogg", "oga", "opus", "wav", "wave",
       "wma", "aiff", "aif", "alac", "ape", "wv", "mp4", "caf", "dsf", "dff", "tta", "spx",

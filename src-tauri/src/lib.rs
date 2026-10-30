@@ -659,6 +659,7 @@ pub fn run() {
             app.manage(AppState { db, net, material });
             desktop::install(app.handle());
             desktop::sync_mini(app.handle(), on_minimize, in_tray);
+            #[cfg(target_os = "android")]
             import_mobile_music(app.handle());
             Ok(())
         })
@@ -719,17 +720,23 @@ fn cache_root(app: &AppHandle) -> std::path::PathBuf {
 }
 
 /// Where the Android folder picker copies what the user picked (private app storage).
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+/// `MainActivity.musicDir()` builds the same path in Kotlin, so both sides must stay in sync.
+#[cfg(target_os = "android")]
 fn mobile_music_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().data_dir().ok().map(|dir| dir.join("music"))
 }
 
 /// The activity drops this file once the picked tree is fully copied, so the scan that follows
 /// never runs against a half-copied folder.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const MOBILE_IMPORT_MARKER: &str = ".import-done";
 
-/// Imports what already sits in the private music folder, e.g. after a restart.
+/// Marker value written by the activity when the user closed the picker without picking a folder.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const MOBILE_IMPORT_CANCELLED: i64 = -2;
+
+/// Imports what already sits in the private music folder, e.g. after a restart.
+#[cfg(target_os = "android")]
 fn import_mobile_music(app: &AppHandle) {
     let Some(dir) = mobile_music_dir(app) else { return };
     if !dir.is_dir() {
@@ -758,17 +765,27 @@ fn mobile_pick_folder(app: AppHandle) -> AppResult<()> {
         std::thread::spawn(move || {
             // The copy runs on the activity side, so wait for its marker instead of guessing.
             for _ in 0..1_200 {
-                if marker.exists() {
-                    let _ = std::fs::remove_file(&marker);
-                    if let Some(state) = handle.try_state::<AppState>() {
-                        let added = scan::import_path(&state.db, &dir, "auto").map(|summary| summary.added).unwrap_or(0);
-                        let _ = handle.emit("library-updated", json!({}));
-                        let _ = handle.emit("mobile-import-finished", json!({ "added": added }));
-                    }
+                let Ok(text) = std::fs::read_to_string(&marker) else {
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                };
+                let _ = std::fs::remove_file(&marker);
+                // The activity writes -1 for a failed copy and -2 for a cancelled picker, so a
+                // negative value means there is nothing to scan and the UI should stop waiting.
+                let copied: i64 = text.trim().parse().unwrap_or(-1);
+                let Some(state) = handle.try_state::<AppState>() else { return };
+                if copied < 0 {
+                    let reason = if copied == MOBILE_IMPORT_CANCELLED { "cancelled" } else { "failed" };
+                    let _ = handle.emit("mobile-import-finished", json!({ "added": 0, "reason": reason }));
                     return;
                 }
-                std::thread::sleep(Duration::from_millis(500));
+                let added = scan::import_path(&state.db, &dir, "auto").map(|summary| summary.added).unwrap_or(0);
+                let _ = handle.emit("library-updated", json!({}));
+                let _ = handle.emit("mobile-import-finished", json!({ "added": added, "reason": "ok" }));
+                return;
             }
+            // Ten minutes without a marker: tell the UI instead of leaving it stuck.
+            let _ = handle.emit("mobile-import-finished", json!({ "added": 0, "reason": "timeout" }));
         });
         Ok(())
     }

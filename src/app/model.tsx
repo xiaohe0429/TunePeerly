@@ -92,6 +92,9 @@ export type DialogState =
 
 export type Toast = { id: number; text: string };
 
+/** Why the Android import stopped: only "ok" means new songs may have been added. */
+export type MobileImportResult = { added: number; reason: "ok" | "cancelled" | "failed" | "timeout" };
+
 const emptyQueue: QueueState = { order: "manual", repeat: "off", contextId: "library", past: [], current: null, future: [], positionSec: 0 };
 
 /** A song another device reported, shown with what this computer knows about it. */
@@ -774,19 +777,43 @@ function useModel() {
       if (isAndroidApp()) {
         // The system picker copies the chosen tree into app storage in the background; Rust
         // rescans when the copy finishes and tells us here, so nothing polls on this side.
-        const done = new Promise<number>((resolve) => {
-          const timer = window.setTimeout(() => resolve(-1), 15 * 60 * 1000);
-          listen<{ added: number }>("mobile-import-finished", (event) => {
+        let stop: (() => void) | undefined;
+        let settled = false;
+        const release = () => {
+          const current = stop;
+          stop = undefined;
+          current?.();
+        };
+        const done = new Promise<MobileImportResult>((resolve) => {
+          const finish = (result: MobileImportResult) => {
+            if (settled) return;
+            settled = true;
             window.clearTimeout(timer);
-            resolve(event.payload.added);
-          }).catch(() => resolve(-1));
+            release();
+            resolve(result);
+          };
+          // Rust stops after ten minutes, so anything a bit later means the copy never reported.
+          const timer = window.setTimeout(() => finish({ added: 0, reason: "timeout" }), 12 * 60 * 1000);
+          listen<MobileImportResult>("mobile-import-finished", (event) => finish(event.payload))
+            .then((unlisten) => {
+              if (settled) unlisten();
+              else stop = unlisten;
+            })
+            .catch(() => finish({ added: 0, reason: "failed" }));
         });
-        await api.mobilePickFolder();
-        const added = await done;
-        if (added > 0) {
-          toast(t("toast.imported", { count: added }));
-          reloadLyrics();
-          await refresh();
+        try {
+          await api.mobilePickFolder();
+          const result = await done;
+          if (result.added > 0) {
+            toast(t("toast.imported", { count: result.added }));
+            reloadLyrics();
+            await refresh();
+          } else if (result.reason === "failed" || result.reason === "timeout") {
+            toast(t("toast.importFailed"));
+          }
+        } finally {
+          settled = true;
+          release();
         }
         return;
       }
